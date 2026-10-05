@@ -1,19 +1,23 @@
 import asyncio
 import logging
 import re
+import os
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, CallbackQuery, Message
-import google.generativeai as genai
+from google import genai
 
 # --- НАСТРОЙКИ ---
 TELEGRAM_TOKEN = "8543901936:AAGZnr0u1cN43abbBOsW3oa1PDZB9U0AFtE"
 GEMINI_API_KEY = "AQ.Ab8RN6KRdgHq25VckveHZjdf-59eUpYCtkc4fksO5g6FrfKlnA"
 
-# Инициализация Gemini старой стабильной библиотекой
-genai.configure(api_key=GEMINI_API_KEY)
+# Передаем ключ через переменные окружения, чтобы новый SDK точно его подхватил без OAuth
+os.environ["GEMINI_API_KEY"] = GEMINI_API_KEY
+
+# Инициализация нового клиента Gemini
+ai_client = genai.Client()
 
 # Настройка логирования
 logging.basicConfig(
@@ -39,7 +43,6 @@ DATES = {
     "after_tomorrow": "Послезавтра"
 }
 
-# Машина состояний (FSM)
 class BetState(StatesGroup):
     choosing_type = State()
     choosing_category = State()
@@ -81,7 +84,7 @@ def get_dates_kb():
     ])
 
 
-# --- ФУНКЦИЯ ГЕНЕРАЦИИ МАТЧА ЧЕРЕЗ GEMINI ---
+# --- ФУНКЦИЯ ГЕНЕРАЦИИ ЧЕРЕЗ НОВЫЙ GEMINI SDK ---
 
 async def fetch_gemini_prediction(sport_name: str, date_text: str):
     prompt = (
@@ -93,9 +96,11 @@ async def fetch_gemini_prediction(sport_name: str, date_text: str):
         f"Кф: [Число с точкой, например 1.85]"
     )
     try:
-        model = genai.GenerativeModel('gemini-1.5-flash')
-        # Запускаем в отдельном потоке, чтобы бот не зависал во время запроса
-        response = await asyncio.to_thread(model.generate_content, prompt)
+        # Используем асинхронный вызов через новый SDK (.aio)
+        response = await ai_client.aio.models.generate_content(
+            model='gemini-2.5-flash',
+            contents=prompt,
+        )
         text = response.text
         logger.info(f"Ответ от Gemini для {sport_name}: {text}")
         
@@ -110,7 +115,7 @@ async def fetch_gemini_prediction(sport_name: str, date_text: str):
         return match_str, pred_str, round(odd_val, 2)
         
     except Exception as e:
-        logger.error(f"Ошибка запроса к Gemini API: {e}")
+        logger.error(f"Ошибка запроса к новому Gemini API: {e}")
         return "Команда А vs Команда Б", "Аналитическое превосходство по статистике личных встреч", 1.80
 
 
@@ -124,7 +129,7 @@ async def cmd_start(message: Message, state: FSMContext):
         "👋 Привет! Я твой продвинутый бот-аналитик на базе **Google Gemini API**.\n\n"
         "Я могу:\n"
         "• Составлять точные **ординары** с аргументацией.\n"
-        "• Генерировать **мультиспортивные экспрессы** (микс видов спорта) с расчетом общего коэффициента.\n\n"
+        "• Генерировать **мультиспортивные экспрессы** с расчетом общего коэффициента.\n\n"
         "Нажми кнопку ниже, чтобы начать:",
         reply_markup=get_main_menu_kb()
     )
@@ -153,7 +158,7 @@ async def process_express_count(callback: CallbackQuery, state: FSMContext):
     count = int(callback.data.split("_")[2])
     await state.update_data(express_count=count, express_items=[])
     await callback.message.edit_text(
-        f"🎯 Экспресс на {count} матча(ей).\nВыберите категорию для **1-го** матча (можно миксовать виды спорта):",
+        f"🎯 Экспресс на {count} матча(ей).\nВыберите категорию для **1-го** матча:",
         reply_markup=get_categories_kb(is_express_mix=True)
     )
     await state.set_state(BetState.building_multisport_express)
@@ -182,7 +187,7 @@ async def process_express_category_choice(callback: CallbackQuery, state: FSMCon
         )
     else:
         await callback.message.edit_text(
-            f"✅ Все {express_count} матча(ей) собраны в купон!\n📅 Выберите целевую дату экспресса:",
+            f"✅ Все {express_count} матча(ей) собраны!\n📅 Выберите дату экспресса:",
             reply_markup=get_dates_kb()
         )
         await state.set_state(BetState.choosing_date)
